@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from logic.kmz_export import MissionConfig, export_waypoints_to_kmz
-from logic.crop import CropWorker, crop_tif_with_polygon
+from logic.crop import CropWorker, crop_tif_with_polygon, normalize_polygon_pixels
 from logic.polygon_io import load_polygons_from_vector, save_polygons_to_shapefile
 from logic.pyramid_builder import PyramidBuildWorker, get_overview_count
 from logic.registration import RegistrationWorker
@@ -796,6 +796,7 @@ class PlotCropPage(QWidget):
         self.btn_remove_plot = QPushButton("删除")
         self.btn_save_plots = QPushButton("保存小区库")
         self.btn_load_plots = QPushButton("加载小区库")
+        self.export_png_check = QCheckBox("裁剪导出为 PNG")
         self.rotation_spin = QDoubleSpinBox()
         self.rotation_spin.setRange(-180.0, 180.0)
         self.rotation_spin.setValue(0.0)
@@ -834,6 +835,7 @@ class PlotCropPage(QWidget):
         row3 = QHBoxLayout()
         row3.addWidget(self.btn_clear_polygon)
         row3.addWidget(self.btn_crop)
+        row3.addWidget(self.export_png_check)
         row3.addStretch(1)
         row3.addWidget(self.vertex_count_label)
 
@@ -914,6 +916,12 @@ class PlotCropPage(QWidget):
         polygon_px = self.viewer.get_polygon_pixels()
         if len(polygon_px) < 3:
             QMessageBox.warning(self, "提示", "当前多边形至少需要 3 个顶点")
+            return
+
+        try:
+            polygon_px, _ = normalize_polygon_pixels(polygon_px)
+        except Exception as exc:
+            QMessageBox.warning(self, "提示", f"当前小区点序无效: {exc}")
             return
 
         geo_points = []
@@ -1091,6 +1099,11 @@ class PlotCropPage(QWidget):
             px, py = self.viewer.geo_to_pixel(gx, gy)
             pixels.append((px, py))
 
+        try:
+            pixels, _ = normalize_polygon_pixels(pixels)
+        except Exception:
+            return False, [], "小区点序无效，无法构成有效多边形"
+
         if len(pixels) < 3:
             return False, [], "顶点不足，无法构成多边形"
 
@@ -1123,6 +1136,9 @@ class PlotCropPage(QWidget):
             cleaned = "".join(out).strip().strip(".")
             return cleaned or "plot"
 
+        export_png = self.export_png_check.isChecked()
+        out_ext = "png" if export_png else "tif"
+
         self._running_batch = True
         self._set_batch_running(True)
         self.progress_bar.setValue(0)
@@ -1142,7 +1158,7 @@ class PlotCropPage(QWidget):
             suffix = used_names.get(base, 0)
             used_names[base] = suffix + 1
             out_base = base if suffix == 0 else f"{base}_{suffix + 1}"
-            out_path = os.path.join(output_dir, f"{out_base}.tif")
+            out_path = os.path.join(output_dir, f"{out_base}.{out_ext}")
 
             vertices = []
             valid = True
@@ -1169,6 +1185,7 @@ class PlotCropPage(QWidget):
                     vertices,
                     out_path,
                     overwrite=False,
+                    output_format=out_ext,
                     progress_callback=lambda p, m, idx=i: self._on_single_crop_progress(idx, total, p, m),
                 )
                 ok_count += 1
@@ -1184,7 +1201,7 @@ class PlotCropPage(QWidget):
             QMessageBox.information(
                 self,
                 "小区裁剪完成",
-                f"成功裁剪 {ok_count}/{total} 个小区\n输出目录:\n{output_dir}",
+                f"成功裁剪 {ok_count}/{total} 个小区\n输出格式: {out_ext.upper()}\n输出目录:\n{output_dir}",
             )
             return
 
@@ -1195,7 +1212,7 @@ class PlotCropPage(QWidget):
         QMessageBox.warning(
             self,
             "小区裁剪部分失败",
-            f"成功 {ok_count}/{total} 个\n输出目录:\n{output_dir}\n\n失败详情:\n{detail}",
+            f"成功 {ok_count}/{total} 个\n输出格式: {out_ext.upper()}\n输出目录:\n{output_dir}\n\n失败详情:\n{detail}",
         )
 
     def _on_single_crop_progress(self, idx: int, total: int, percent: int, _message: str):

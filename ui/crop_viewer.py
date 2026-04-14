@@ -1,3 +1,4 @@
+import math
 from typing import List, Tuple
 
 import numpy as np
@@ -56,6 +57,7 @@ class CropViewer(QGraphicsView):
         self.ds = None
         self.full_w = 0
         self.full_h = 0
+        self.alpha_band_index = None
 
         self.base_item = None
         self.high_res_item = QGraphicsPixmapItem()
@@ -140,6 +142,7 @@ class CropViewer(QGraphicsView):
         self.ds = ds
         self.full_w = ds.RasterXSize
         self.full_h = ds.RasterYSize
+        self.alpha_band_index = self._detect_alpha_band_index()
 
         self.base_item = self.create_base_layer()
         self.scene_obj.addItem(self.base_item)
@@ -151,9 +154,18 @@ class CropViewer(QGraphicsView):
         self._apply_base_view_transform()
         self.update_resolution()
 
-    def _read_rgb(self, x: int, y: int, w: int, h: int, out_w: int, out_h: int):
+    def _detect_alpha_band_index(self):
+        if self.ds is None:
+            return None
+        for i in range(1, self.ds.RasterCount + 1):
+            band = self.ds.GetRasterBand(i)
+            if band.GetColorInterpretation() == gdal.GCI_AlphaBand:
+                return i
+        return None
+
+    def _read_rgba(self, x: int, y: int, w: int, h: int, out_w: int, out_h: int):
         if self.ds.RasterCount >= 3:
-            arr = np.dstack(
+            rgb = np.dstack(
                 [
                     self.ds.GetRasterBand(i).ReadAsArray(
                         x,
@@ -175,8 +187,23 @@ class CropViewer(QGraphicsView):
                 buf_xsize=out_w,
                 buf_ysize=out_h,
             )
-            arr = np.dstack([gray, gray, gray])
-        return arr.astype(np.uint8, copy=False)
+            rgb = np.dstack([gray, gray, gray])
+
+        if self.alpha_band_index is not None and self.alpha_band_index <= self.ds.RasterCount:
+            alpha = self.ds.GetRasterBand(self.alpha_band_index).ReadAsArray(
+                x,
+                y,
+                w,
+                h,
+                buf_xsize=out_w,
+                buf_ysize=out_h,
+            )
+        else:
+            alpha = np.full((out_h, out_w), 255, dtype=np.uint8)
+
+        rgb = rgb.astype(np.uint8, copy=False)
+        alpha = alpha.astype(np.uint8, copy=False)
+        return np.dstack([rgb, alpha])
 
     def create_base_layer(self):
         band = self.ds.GetRasterBand(1)
@@ -186,13 +213,32 @@ class CropViewer(QGraphicsView):
             ov_idx = ov_count - 1
             if self.ds.RasterCount >= 3:
                 bands = [self.ds.GetRasterBand(i).GetOverview(ov_idx) for i in [1, 2, 3]]
-                data = np.dstack([b.ReadAsArray() for b in bands]).astype(np.uint8, copy=False)
+                rgb = np.dstack([b.ReadAsArray() for b in bands]).astype(np.uint8, copy=False)
             else:
                 b = self.ds.GetRasterBand(1).GetOverview(ov_idx)
                 g = b.ReadAsArray().astype(np.uint8, copy=False)
-                data = np.dstack([g, g, g])
+                rgb = np.dstack([g, g, g])
+
+            if self.alpha_band_index is not None and self.alpha_band_index <= self.ds.RasterCount:
+                a_band = self.ds.GetRasterBand(self.alpha_band_index)
+                a_ov = a_band.GetOverview(ov_idx)
+                if a_ov is not None:
+                    alpha = a_ov.ReadAsArray().astype(np.uint8, copy=False)
+                else:
+                    alpha = a_band.ReadAsArray(
+                        0,
+                        0,
+                        self.full_w,
+                        self.full_h,
+                        buf_xsize=rgb.shape[1],
+                        buf_ysize=rgb.shape[0],
+                    ).astype(np.uint8, copy=False)
+            else:
+                alpha = np.full((rgb.shape[0], rgb.shape[1]), 255, dtype=np.uint8)
+
+            data = np.dstack([rgb, alpha])
             h, w, _ = data.shape
-            qimg = QImage(data.data, w, h, w * 3, QImage.Format_RGB888)
+            qimg = QImage(data.data, w, h, w * 4, QImage.Format_RGBA8888)
             pix = QPixmap.fromImage(qimg.copy())
             item = QGraphicsPixmapItem(pix)
             item.setScale(self.full_w / w)
@@ -202,8 +248,8 @@ class CropViewer(QGraphicsView):
         target_w = 2048
         ratio = self.full_h / max(1, self.full_w)
         target_h = max(1, int(target_w * ratio))
-        data = self._read_rgb(0, 0, self.full_w, self.full_h, target_w, target_h)
-        qimg = QImage(data.data, target_w, target_h, target_w * 3, QImage.Format_RGB888)
+        data = self._read_rgba(0, 0, self.full_w, self.full_h, target_w, target_h)
+        qimg = QImage(data.data, target_w, target_h, target_w * 4, QImage.Format_RGBA8888)
         pix = QPixmap.fromImage(qimg.copy())
         item = QGraphicsPixmapItem(pix)
         item.setScale(self.full_w / target_w)
@@ -316,8 +362,8 @@ class CropViewer(QGraphicsView):
         target_h = max(1, int(h * view_scale))
 
         try:
-            data = self._read_rgb(x, y, w, h, target_w, target_h)
-            qimg = QImage(data.data, target_w, target_h, target_w * 3, QImage.Format_RGB888)
+            data = self._read_rgba(x, y, w, h, target_w, target_h)
+            qimg = QImage(data.data, target_w, target_h, target_w * 4, QImage.Format_RGBA8888)
             self.high_res_item.setPixmap(QPixmap.fromImage(qimg.copy()))
             self.high_res_item.setPos(x, y)
             self.high_res_item.setScale(w / target_w)
@@ -358,14 +404,86 @@ class CropViewer(QGraphicsView):
             self.polygon_item.setPath(path)
             return
 
-        x0, y0 = self.vertices[0]
+        draw_vertices = self._normalize_vertices_for_display(self.vertices)
+        if not draw_vertices:
+            self.polygon_item.setPath(path)
+            return
+
+        x0, y0 = draw_vertices[0]
         path.moveTo(x0, y0)
-        for x, y in self.vertices[1:]:
+        for x, y in draw_vertices[1:]:
             path.lineTo(x, y)
-        if len(self.vertices) >= 3:
+        if len(draw_vertices) >= 3:
             path.closeSubpath()
 
         self.polygon_item.setPath(path)
+
+    def _normalize_vertices_for_display(self, vertices: List[Tuple[float, float]]):
+        pts = [(float(x), float(y)) for x, y in vertices]
+        if len(pts) < 4:
+            return pts
+        if not self._is_self_intersecting(pts):
+            return pts
+
+        cx = sum([p[0] for p in pts]) / len(pts)
+        cy = sum([p[1] for p in pts]) / len(pts)
+        fixed = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+        if self._is_self_intersecting(fixed):
+            return pts
+        return fixed
+
+    def _is_self_intersecting(self, pts: List[Tuple[float, float]]) -> bool:
+        n = len(pts)
+        if n < 4:
+            return False
+
+        for i in range(n):
+            a1 = pts[i]
+            a2 = pts[(i + 1) % n]
+            for j in range(i + 1, n):
+                b1 = pts[j]
+                b2 = pts[(j + 1) % n]
+
+                if i == j:
+                    continue
+                if (i + 1) % n == j:
+                    continue
+                if i == (j + 1) % n:
+                    continue
+
+                if self._segments_intersect(a1, a2, b1, b2):
+                    return True
+        return False
+
+    def _segments_intersect(self, p1, q1, p2, q2):
+        def orient(a, b, c):
+            v = (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1])
+            if abs(v) < 1e-12:
+                return 0
+            return 1 if v > 0 else 2
+
+        def on_seg(a, b, c):
+            return (
+                min(a[0], c[0]) - 1e-12 <= b[0] <= max(a[0], c[0]) + 1e-12
+                and min(a[1], c[1]) - 1e-12 <= b[1] <= max(a[1], c[1]) + 1e-12
+            )
+
+        o1 = orient(p1, q1, p2)
+        o2 = orient(p1, q1, q2)
+        o3 = orient(p2, q2, p1)
+        o4 = orient(p2, q2, q1)
+
+        if o1 != o2 and o3 != o4:
+            return True
+        if o1 == 0 and on_seg(p1, p2, q1):
+            return True
+        if o2 == 0 and on_seg(p1, q2, q1):
+            return True
+        if o3 == 0 and on_seg(p2, p1, q2):
+            return True
+        if o4 == 0 and on_seg(p2, q1, q2):
+            return True
+        return False
 
     def get_polygon_pixels(self):
         return list(self.vertices)
@@ -400,10 +518,14 @@ class CropViewer(QGraphicsView):
             if len(vertices) < 3:
                 continue
 
+            draw_vertices = self._normalize_vertices_for_display(vertices)
+            if len(draw_vertices) < 3:
+                continue
+
             path = QPainterPath()
-            x0, y0 = vertices[0]
+            x0, y0 = draw_vertices[0]
             path.moveTo(x0, y0)
-            for x, y in vertices[1:]:
+            for x, y in draw_vertices[1:]:
                 path.lineTo(x, y)
             path.closeSubpath()
 
@@ -414,7 +536,7 @@ class CropViewer(QGraphicsView):
             self.scene_obj.addItem(poly_item)
             self.saved_polygon_items.append(poly_item)
 
-            cx, cy = self._polygon_center(vertices)
+            cx, cy = self._polygon_center(draw_vertices)
             label_item = QGraphicsSimpleTextItem(name)
             font = QFont("Arial", 10, QFont.Bold)
             label_item.setFont(font)
