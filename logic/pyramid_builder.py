@@ -20,6 +20,25 @@ def get_overview_count(tif_path: str) -> int:
     return ov_count
 
 
+def get_tif_profile(tif_path: str) -> tuple[int, int, int]:
+    """Return (width, height, overview_count) for the first band."""
+    configure_runtime_env()
+    from osgeo import gdal
+
+    gdal.UseExceptions()
+    ds = gdal.Open(tif_path, gdal.GA_ReadOnly)
+    if ds is None:
+        raise RuntimeError("无法打开该 TIF 文件")
+    if ds.RasterCount <= 0:
+        raise RuntimeError("影像波段为空")
+
+    width = ds.RasterXSize
+    height = ds.RasterYSize
+    ov_count = ds.GetRasterBand(1).GetOverviewCount()
+    ds = None
+    return width, height, ov_count
+
+
 class PyramidBuildWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(str)

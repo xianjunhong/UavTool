@@ -33,12 +33,15 @@ from PySide6.QtWidgets import (
 from logic.kmz_export import MissionConfig, export_waypoints_to_kmz
 from logic.crop import CropWorker, crop_tif_with_polygon, normalize_polygon_pixels
 from logic.polygon_io import load_polygons_from_vector, save_polygons_to_shapefile
-from logic.pyramid_builder import PyramidBuildWorker, get_overview_count
+from logic.pyramid_builder import PyramidBuildWorker, get_overview_count, get_tif_profile
 from logic.registration import RegistrationWorker
 from logic.waypoint_logic import format_waypoint
 from ui.crop_viewer import CropViewer
 from ui.registration_viewer import RegistrationViewer
 from ui.viewer import UavViewer
+
+
+MAX_PIXELS_WITHOUT_OVERVIEW = 120_000_000
 
 
 def _resolve_window_icon_path() -> str:
@@ -59,6 +62,22 @@ def _resolve_window_icon_path() -> str:
     for path in candidates:
         if path and os.path.exists(path):
             return path
+    return ""
+
+
+def _check_large_image_without_pyramid(tif_path: str) -> str:
+    """Return empty string if import is allowed, otherwise return block reason."""
+    width, height, ov_count = get_tif_profile(tif_path)
+    if ov_count > 0:
+        return ""
+
+    if width * height > MAX_PIXELS_WITHOUT_OVERVIEW:
+        return (
+            "该影像分辨率过大且未构建金字塔，当前页面不允许直接导入，"
+            "请先到“金字塔构建”页构建后再导入。\n"
+            f"当前尺寸: {width} x {height}"
+        )
+
     return ""
 
 
@@ -208,6 +227,10 @@ class DrawRoutePage(QWidget):
             return
 
         try:
+            block_reason = _check_large_image_without_pyramid(file_path)
+            if block_reason:
+                QMessageBox.warning(self, "导入失败", block_reason)
+                return
             self.viewer.load_tif(file_path)
             self.coord_list.clear()
         except Exception as exc:
@@ -505,6 +528,10 @@ class RegistrationPage(QWidget):
         if not path:
             return
         try:
+            block_reason = _check_large_image_without_pyramid(path)
+            if block_reason:
+                QMessageBox.warning(self, "加载失败", block_reason)
+                return
             self.src_viewer.load_tif(path)
             self.src_tif_path = path
             self.src_path_edit.setText(path)
@@ -517,6 +544,10 @@ class RegistrationPage(QWidget):
         if not path:
             return
         try:
+            block_reason = _check_large_image_without_pyramid(path)
+            if block_reason:
+                QMessageBox.warning(self, "加载失败", block_reason)
+                return
             self.target_viewer.load_tif(path)
             self.target_tif_path = path
             self.target_path_edit.setText(path)
@@ -690,6 +721,10 @@ class ImageCropPage(QWidget):
         if not path:
             return
         try:
+            block_reason = _check_large_image_without_pyramid(path)
+            if block_reason:
+                QMessageBox.warning(self, "加载失败", block_reason)
+                return
             self.viewer.load_tif(path)
             self.viewer.set_saved_polygons([])
             self.tif_path = path
@@ -908,6 +943,10 @@ class PlotCropPage(QWidget):
         if not path:
             return
         try:
+            block_reason = _check_large_image_without_pyramid(path)
+            if block_reason:
+                QMessageBox.warning(self, "加载失败", block_reason)
+                return
             self.viewer.load_tif(path)
             self.tif_path = path
             self.tif_path_edit.setText(path)

@@ -2,12 +2,11 @@
 
 UavTool 是一个面向无人机航点作业的桌面工具，核心目标是：
 
-1. 在 GeoTIFF 上快速选点并生成经纬度航点。
-2. 将航点按 DJI WPML 格式导出为 KMZ。
-3. 对无金字塔的 TIF 进行 overviews 构建，提升大图缩放性能。
-4. 对两幅影像进行控制点配准，并输出新的对齐 TIF。
-5. 图像裁剪支持自相交点序自动修复与透明边输出。
-6. 小区裁剪支持小区库复用与批量导出（TIF/PNG）。
+1. 在 GeoTIFF 上快速选点并生成经纬度航点，将航点按 DJI WPML 格式导出为 KMZ。
+2. 对无金字塔的 TIF 进行 overviews 构建，提升大图缩放性能。
+3. 对两幅影像进行控制点配准，并输出新的对齐 TIF。
+4. TIF大图像裁剪。
+5. 小区裁剪支持小区库复用与批量导出（TIF/PNG）。
 
 ## 当前可以做什么
 
@@ -103,14 +102,9 @@ UavTool 是一个面向无人机航点作业的桌面工具，核心目标是：
 4. utils/: 运行环境与地理工具
 
 ## 运行方式
-
-推荐解释器：
-
-C:\Users\Frank\.conda\envs\UavTool\python.exe
-
 启动命令：
 
-C:\Users\Frank\.conda\envs\UavTool\python.exe main.py
+python.exe main.py
 
 ## 已知说明
 
