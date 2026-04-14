@@ -83,8 +83,10 @@ class CropViewer(QGraphicsView):
         self._press_pos = QPoint()
         self._last_pan_pos = QPoint()
         self._dragging = False
+        self._skip_release_add_once = False
 
         self.on_polygon_changed = None
+        self.on_polygon_finish_requested = None
         self.display_rotation_deg = 0.0
 
     def has_image(self) -> bool:
@@ -267,6 +269,11 @@ class CropViewer(QGraphicsView):
         if self.ds is None:
             return
 
+        # Some platforms may not emit the paired release after double click.
+        # Clear stale skip state before handling a new left-button click.
+        if event.button() == Qt.LeftButton and self._skip_release_add_once:
+            self._skip_release_add_once = False
+
         self._press_button = event.button()
         self._press_pos = event.pos()
         self._last_pan_pos = event.pos()
@@ -314,6 +321,10 @@ class CropViewer(QGraphicsView):
             return
 
         if btn == Qt.LeftButton:
+            if self._skip_release_add_once:
+                self._skip_release_add_once = False
+                event.accept()
+                return
             self.add_vertex(release_scene.x(), release_scene.y())
             event.accept()
             return
@@ -324,6 +335,20 @@ class CropViewer(QGraphicsView):
             return
 
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self.ds is None:
+            return
+
+        if event.button() == Qt.LeftButton:
+            # Ignore the paired release-add triggered by Qt on double click.
+            self._skip_release_add_once = True
+            if callable(self.on_polygon_finish_requested):
+                self.on_polygon_finish_requested()
+            event.accept()
+            return
+
+        super().mouseDoubleClickEvent(event)
 
     def update_resolution(self):
         if self.ds is None:

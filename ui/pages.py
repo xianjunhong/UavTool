@@ -1,8 +1,9 @@
 import os
+import sys
 import time
 
 from PySide6.QtCore import QThread
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -38,6 +39,27 @@ from logic.waypoint_logic import format_waypoint
 from ui.crop_viewer import CropViewer
 from ui.registration_viewer import RegistrationViewer
 from ui.viewer import UavViewer
+
+
+def _resolve_window_icon_path() -> str:
+    candidates = []
+
+    # Source run: ui/pages.py -> project root/uav_icon.ico
+    candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uav_icon.ico")))
+
+    if getattr(sys, "frozen", False):
+        # Frozen run: data files are extracted/collected under _MEIPASS.
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.insert(0, os.path.join(meipass, "uav_icon.ico"))
+
+        # Fallback: icon placed next to executable.
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "uav_icon.ico"))
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return ""
 
 
 class ExportKmzDialog(QDialog):
@@ -879,6 +901,7 @@ class PlotCropPage(QWidget):
         self.plot_list.itemDoubleClicked.connect(lambda _: self.apply_selected_plot())
         self.rotation_spin.valueChanged.connect(self.viewer.set_display_rotation)
         self.viewer.on_polygon_changed = self.on_polygon_changed
+        self.viewer.on_polygon_finish_requested = self.add_current_plot
 
     def choose_tif(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择待裁剪影像", "", "GeoTIFF (*.tif *.tiff)")
@@ -1241,6 +1264,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("UavTool")
+        icon_path = _resolve_window_icon_path()
+        if icon_path:
+            self.setWindowIcon(QIcon(icon_path))
         self.resize(1440, 900)
 
         container = QWidget()

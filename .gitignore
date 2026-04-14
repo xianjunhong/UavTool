@@ -15,7 +15,8 @@ env/
 
 .DS_Store
 Thumbs.db
-
+build/
+dist/
 *.tif
 *.tiff
 *.dbf
