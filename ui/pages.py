@@ -81,6 +81,16 @@ def _check_large_image_without_pyramid(tif_path: str) -> str:
     return ""
 
 
+def _setup_rgb_band_combo(combo: QComboBox):
+    combo.addItem("自动(推荐)", None)
+    combo.addItem("RGB: 1,2,3", (1, 2, 3))
+    combo.addItem("MS: 3,2,1", (3, 2, 1))
+
+
+def _selected_rgb_bands(combo: QComboBox):
+    return combo.currentData()
+
+
 class ExportKmzDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -179,6 +189,8 @@ class DrawRoutePage(QWidget):
         self.coord_list = QListWidget()
         self.import_btn = QPushButton("导入 TIF")
         self.export_btn = QPushButton("导出航线")
+        self.rgb_combo = QComboBox()
+        _setup_rgb_band_combo(self.rgb_combo)
         self.rotation_spin = QDoubleSpinBox()
         self.rotation_spin.setRange(-180.0, 180.0)
         self.rotation_spin.setValue(0.0)
@@ -194,6 +206,8 @@ class DrawRoutePage(QWidget):
         head = QHBoxLayout()
         head.addWidget(self.import_btn)
         head.addWidget(self.export_btn)
+        head.addWidget(QLabel("显示波段"))
+        head.addWidget(self.rgb_combo)
         head.addWidget(QLabel("旋转"))
         head.addWidget(self.rotation_spin)
         head.addStretch(1)
@@ -215,6 +229,9 @@ class DrawRoutePage(QWidget):
     def _bind_events(self):
         self.import_btn.clicked.connect(self.handle_import)
         self.export_btn.clicked.connect(self.handle_export)
+        self.rgb_combo.currentIndexChanged.connect(
+            lambda _: self.viewer.set_display_rgb_bands(_selected_rgb_bands(self.rgb_combo))
+        )
         self.rotation_spin.valueChanged.connect(self.viewer.set_display_rotation)
         self.coord_list.itemDoubleClicked.connect(self.on_list_item_double_clicked)
         self.viewer.on_waypoint_added = self.on_waypoint_added
@@ -231,6 +248,7 @@ class DrawRoutePage(QWidget):
             if block_reason:
                 QMessageBox.warning(self, "导入失败", block_reason)
                 return
+            self.viewer.set_display_rgb_bands(_selected_rgb_bands(self.rgb_combo))
             self.viewer.load_tif(file_path)
             self.coord_list.clear()
         except Exception as exc:
@@ -439,11 +457,15 @@ class RegistrationPage(QWidget):
         self.src_rotation_spin.setValue(0.0)
         self.src_rotation_spin.setSingleStep(1.0)
         self.src_rotation_spin.setSuffix("°")
+        self.src_rgb_combo = QComboBox()
+        _setup_rgb_band_combo(self.src_rgb_combo)
         self.target_rotation_spin = QDoubleSpinBox()
         self.target_rotation_spin.setRange(-180.0, 180.0)
         self.target_rotation_spin.setValue(0.0)
         self.target_rotation_spin.setSingleStep(1.0)
         self.target_rotation_spin.setSuffix("°")
+        self.target_rgb_combo = QComboBox()
+        _setup_rgb_band_combo(self.target_rgb_combo)
 
         self.btn_choose_src = QPushButton("选择 src 图像")
         self.btn_choose_target = QPushButton("选择 target 图像")
@@ -475,12 +497,16 @@ class RegistrationPage(QWidget):
         top_src = QHBoxLayout()
         top_src.addWidget(self.btn_choose_src)
         top_src.addWidget(self.src_path_edit, 1)
+        top_src.addWidget(QLabel("波段"))
+        top_src.addWidget(self.src_rgb_combo)
         top_src.addWidget(QLabel("旋转"))
         top_src.addWidget(self.src_rotation_spin)
 
         top_tgt = QHBoxLayout()
         top_tgt.addWidget(self.btn_choose_target)
         top_tgt.addWidget(self.target_path_edit, 1)
+        top_tgt.addWidget(QLabel("波段"))
+        top_tgt.addWidget(self.target_rgb_combo)
         top_tgt.addWidget(QLabel("旋转"))
         top_tgt.addWidget(self.target_rotation_spin)
 
@@ -517,6 +543,12 @@ class RegistrationPage(QWidget):
         self.btn_clear_src.clicked.connect(self.src_viewer.clear_points)
         self.btn_clear_target.clicked.connect(self.target_viewer.clear_points)
         self.btn_align.clicked.connect(self.align_images)
+        self.src_rgb_combo.currentIndexChanged.connect(
+            lambda _: self.src_viewer.set_display_rgb_bands(_selected_rgb_bands(self.src_rgb_combo))
+        )
+        self.target_rgb_combo.currentIndexChanged.connect(
+            lambda _: self.target_viewer.set_display_rgb_bands(_selected_rgb_bands(self.target_rgb_combo))
+        )
         self.src_rotation_spin.valueChanged.connect(self.src_viewer.set_display_rotation)
         self.target_rotation_spin.valueChanged.connect(self.target_viewer.set_display_rotation)
 
@@ -532,6 +564,7 @@ class RegistrationPage(QWidget):
             if block_reason:
                 QMessageBox.warning(self, "加载失败", block_reason)
                 return
+            self.src_viewer.set_display_rgb_bands(_selected_rgb_bands(self.src_rgb_combo))
             self.src_viewer.load_tif(path)
             self.src_tif_path = path
             self.src_path_edit.setText(path)
@@ -548,6 +581,7 @@ class RegistrationPage(QWidget):
             if block_reason:
                 QMessageBox.warning(self, "加载失败", block_reason)
                 return
+            self.target_viewer.set_display_rgb_bands(_selected_rgb_bands(self.target_rgb_combo))
             self.target_viewer.load_tif(path)
             self.target_tif_path = path
             self.target_path_edit.setText(path)
@@ -659,6 +693,8 @@ class ImageCropPage(QWidget):
         self.btn_clear_polygon = QPushButton("清空多边形")
         self.btn_crop = QPushButton("执行裁剪")
         self.overwrite_check = QCheckBox("在原图上裁剪（覆盖原文件）")
+        self.rgb_combo = QComboBox()
+        _setup_rgb_band_combo(self.rgb_combo)
         self.rotation_spin = QDoubleSpinBox()
         self.rotation_spin.setRange(-180.0, 180.0)
         self.rotation_spin.setValue(0.0)
@@ -686,6 +722,8 @@ class ImageCropPage(QWidget):
         row1 = QHBoxLayout()
         row1.addWidget(self.btn_choose_tif)
         row1.addWidget(self.tif_path_edit, 1)
+        row1.addWidget(QLabel("波段"))
+        row1.addWidget(self.rgb_combo)
         row1.addWidget(QLabel("旋转"))
         row1.addWidget(self.rotation_spin)
 
@@ -713,6 +751,9 @@ class ImageCropPage(QWidget):
         self.btn_clear_polygon.clicked.connect(self.viewer.clear_polygon)
         self.btn_crop.clicked.connect(self.start_crop)
         self.overwrite_check.toggled.connect(self.on_overwrite_toggled)
+        self.rgb_combo.currentIndexChanged.connect(
+            lambda _: self.viewer.set_display_rgb_bands(_selected_rgb_bands(self.rgb_combo))
+        )
         self.rotation_spin.valueChanged.connect(self.viewer.set_display_rotation)
         self.viewer.on_polygon_changed = self.on_polygon_changed
 
@@ -725,6 +766,7 @@ class ImageCropPage(QWidget):
             if block_reason:
                 QMessageBox.warning(self, "加载失败", block_reason)
                 return
+            self.viewer.set_display_rgb_bands(_selected_rgb_bands(self.rgb_combo))
             self.viewer.load_tif(path)
             self.viewer.set_saved_polygons([])
             self.tif_path = path
@@ -854,6 +896,8 @@ class PlotCropPage(QWidget):
         self.btn_save_plots = QPushButton("保存小区库")
         self.btn_load_plots = QPushButton("加载小区库")
         self.export_png_check = QCheckBox("裁剪导出为 PNG")
+        self.rgb_combo = QComboBox()
+        _setup_rgb_band_combo(self.rgb_combo)
         self.rotation_spin = QDoubleSpinBox()
         self.rotation_spin.setRange(-180.0, 180.0)
         self.rotation_spin.setValue(0.0)
@@ -882,6 +926,8 @@ class PlotCropPage(QWidget):
         row1 = QHBoxLayout()
         row1.addWidget(self.btn_choose_tif)
         row1.addWidget(self.tif_path_edit, 1)
+        row1.addWidget(QLabel("波段"))
+        row1.addWidget(self.rgb_combo)
         row1.addWidget(QLabel("旋转"))
         row1.addWidget(self.rotation_spin)
 
@@ -934,6 +980,9 @@ class PlotCropPage(QWidget):
         self.btn_save_plots.clicked.connect(self.save_plot_library)
         self.btn_load_plots.clicked.connect(self.load_plot_library)
         self.plot_list.itemDoubleClicked.connect(lambda _: self.apply_selected_plot())
+        self.rgb_combo.currentIndexChanged.connect(
+            lambda _: self.viewer.set_display_rgb_bands(_selected_rgb_bands(self.rgb_combo))
+        )
         self.rotation_spin.valueChanged.connect(self.viewer.set_display_rotation)
         self.viewer.on_polygon_changed = self.on_polygon_changed
         self.viewer.on_polygon_finish_requested = self.add_current_plot
@@ -947,6 +996,7 @@ class PlotCropPage(QWidget):
             if block_reason:
                 QMessageBox.warning(self, "加载失败", block_reason)
                 return
+            self.viewer.set_display_rgb_bands(_selected_rgb_bands(self.rgb_combo))
             self.viewer.load_tif(path)
             self.tif_path = path
             self.tif_path_edit.setText(path)

@@ -112,6 +112,8 @@ class UavViewer(QGraphicsView):
         self.on_waypoints_reindexed = None
 
         self.display_rotation_deg = 0.0
+        self.display_rgb_bands = None
+        self._display_band_ranges = {}
 
     def _current_view_scale(self) -> float:
         t = self.transform()
@@ -143,6 +145,123 @@ class UavViewer(QGraphicsView):
         view_scale = self._current_view_scale()
         for wp in self.waypoints:
             wp.marker.update_visual_scale(view_scale)
+
+    def set_display_rgb_bands(self, bands):
+        self.display_rgb_bands = tuple(bands) if bands is not None else None
+        self._display_band_ranges = {}
+        if self.ds is None:
+            return
+
+        if self.base_item is not None:
+            self.scene_obj.removeItem(self.base_item)
+        self.base_item = self.create_base_layer()
+        self.scene_obj.addItem(self.base_item)
+        self.high_res_item.setZValue(5)
+        self.refresh_marker_sizes()
+        self.update_resolution()
+
+    def _is_standard_rgb_layout(self) -> bool:
+        if self.ds is None or self.ds.RasterCount < 3:
+            return False
+        ci = [self.ds.GetRasterBand(i).GetColorInterpretation() for i in [1, 2, 3]]
+        return ci == [gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand]
+
+    def _resolve_display_rgb_bands(self):
+        if self.ds is None or self.ds.RasterCount <= 0:
+            return (1, 1, 1)
+
+        count = self.ds.RasterCount
+        if self.display_rgb_bands is not None:
+            return tuple(max(1, min(count, int(v))) for v in self.display_rgb_bands)
+
+        if count >= 3 and self._is_standard_rgb_layout():
+            return (1, 2, 3)
+        if count >= 3:
+            return (3, 2, 1)
+        return (1, 1, 1)
+
+    def _to_uint8_gray(self, arr):
+        return self._to_uint8_gray_with_range(arr, None, None, None)
+
+    def _to_uint8_gray_with_range(self, arr, lo, hi, nodata):
+        if arr is None:
+            return np.zeros((1, 1), dtype=np.uint8)
+        if arr.dtype == np.uint8:
+            return arr
+
+        a = np.asarray(arr, dtype=np.float32)
+        valid = np.isfinite(a)
+        if nodata is not None:
+            valid &= ~np.isclose(a, float(nodata), rtol=0.0, atol=1e-6)
+        if not np.any(valid):
+            return np.zeros(a.shape, dtype=np.uint8)
+
+        if lo is None or hi is None:
+            vals = a[valid]
+            lo, hi = np.percentile(vals, [2, 98])
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                lo = float(np.min(vals))
+                hi = float(np.max(vals))
+                if hi <= lo:
+                    return np.zeros(a.shape, dtype=np.uint8)
+
+        a = np.nan_to_num(a, nan=lo, posinf=hi, neginf=lo)
+        a = np.clip((a - lo) * 255.0 / (hi - lo), 0, 255)
+        return a.astype(np.uint8)
+
+    def _band_stretch_range(self, band_id: int):
+        if band_id in self._display_band_ranges:
+            return self._display_band_ranges[band_id]
+
+        band = self.ds.GetRasterBand(band_id)
+        ov_count = band.GetOverviewCount()
+        if ov_count > 0:
+            src = band.GetOverview(ov_count - 1)
+            arr = src.ReadAsArray()
+        else:
+            target_w = min(2048, self.full_w)
+            target_h = max(1, int(round(self.full_h * target_w / max(1, self.full_w))))
+            arr = band.ReadAsArray(0, 0, self.full_w, self.full_h, buf_xsize=target_w, buf_ysize=target_h)
+
+        a = np.asarray(arr, dtype=np.float32)
+        valid = np.isfinite(a)
+        nodata = band.GetNoDataValue()
+        if nodata is not None:
+            valid &= ~np.isclose(a, float(nodata), rtol=0.0, atol=1e-6)
+
+        if np.any(valid):
+            vals = a[valid]
+            lo, hi = np.percentile(vals, [2, 98])
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                lo = float(np.min(vals))
+                hi = float(np.max(vals))
+        else:
+            lo, hi = 0.0, 255.0
+
+        if hi <= lo:
+            hi = lo + 1.0
+
+        self._display_band_ranges[band_id] = (float(lo), float(hi))
+        return self._display_band_ranges[band_id]
+
+    def _read_rgb_uint8(self, x: int, y: int, w: int, h: int, out_w: int, out_h: int, band_ids):
+        channels = []
+        for band_id in band_ids:
+            band = self.ds.GetRasterBand(band_id)
+            arr = band.ReadAsArray(x, y, w, h, buf_xsize=out_w, buf_ysize=out_h)
+            lo, hi = self._band_stretch_range(band_id)
+            nodata = band.GetNoDataValue()
+            channels.append(self._to_uint8_gray_with_range(arr, lo, hi, nodata))
+        return np.dstack(channels)
+
+    def _to_uint8_rgb(self, arr):
+        a = np.asarray(arr)
+        if a.dtype == np.uint8:
+            return a
+        if a.ndim == 3 and a.shape[2] == 3:
+            channels = [self._to_uint8_gray(a[:, :, i]) for i in range(3)]
+            return np.dstack(channels)
+        return self._to_uint8_gray(a)
 
     def reset_view(self):
         self.resetTransform()
@@ -183,8 +302,15 @@ class UavViewer(QGraphicsView):
     def create_base_layer(self):
         band = self.ds.GetRasterBand(1)
         ov_idx = band.GetOverviewCount() - 1
-        bands = [self.ds.GetRasterBand(i).GetOverview(ov_idx) for i in [1, 2, 3]]
-        data = np.dstack([b.ReadAsArray() for b in bands]).astype(np.uint8, copy=False)
+        band_ids = self._resolve_display_rgb_bands()
+        channels = []
+        for band_id in band_ids:
+            b = self.ds.GetRasterBand(band_id).GetOverview(ov_idx)
+            arr = b.ReadAsArray()
+            lo, hi = self._band_stretch_range(band_id)
+            nodata = self.ds.GetRasterBand(band_id).GetNoDataValue()
+            channels.append(self._to_uint8_gray_with_range(arr, lo, hi, nodata))
+        data = np.dstack(channels)
 
         h, w, _ = data.shape
         qimg = QImage(data.data, w, h, w * 3, QImage.Format_RGB888)
@@ -300,19 +426,8 @@ class UavViewer(QGraphicsView):
         target_h = max(1, int(h * view_scale))
 
         try:
-            rgb = np.dstack(
-                [
-                    self.ds.GetRasterBand(i).ReadAsArray(
-                        x,
-                        y,
-                        w,
-                        h,
-                        buf_xsize=target_w,
-                        buf_ysize=target_h,
-                    )
-                    for i in [1, 2, 3]
-                ]
-            ).astype(np.uint8, copy=False)
+            band_ids = self._resolve_display_rgb_bands()
+            rgb = self._read_rgb_uint8(x, y, w, h, target_w, target_h, band_ids)
 
             qimg = QImage(rgb.data, target_w, target_h, target_w * 3, QImage.Format_RGB888)
             self.high_res_item.setPixmap(QPixmap.fromImage(qimg.copy()))
