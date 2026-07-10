@@ -2,7 +2,7 @@ import os
 import sys
 
 
-def configure_runtime_env(fallback_env_base: str = r"C:\Users\Frank\.conda\envs\UavTool"):
+def configure_runtime_env(fallback_env_base: str = ""):
     """Ensure PROJ/GDAL runtime paths are configured before importing geo libs."""
     candidates = []
 

@@ -225,6 +225,13 @@ class RegistrationViewer(QGraphicsView):
         self.points = []
         self.markers = []
 
+    def unload_image(self):
+        self.reset_view()
+        self.ds = None
+        self.full_w = 0
+        self.full_h = 0
+        self._display_band_ranges = {}
+
     def load_tif(self, tif_path: str):
         ds = gdal.Open(tif_path, gdal.GA_ReadOnly)
         if ds is None:

@@ -271,6 +271,15 @@ class UavViewer(QGraphicsView):
         self.scene_obj.addItem(self.high_res_item)
         self.waypoints = []
 
+    def unload_image(self):
+        self.reset_view()
+        self.ds = None
+        self.geo_transform = None
+        self.transformer = None
+        self.full_w = 0
+        self.full_h = 0
+        self._display_band_ranges = {}
+
     def load_tif(self, tif_path: str):
         ds = gdal.Open(tif_path, gdal.GA_ReadOnly)
         if ds is None:

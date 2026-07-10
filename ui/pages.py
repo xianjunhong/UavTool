@@ -238,6 +238,12 @@ class DrawRoutePage(QWidget):
         self.viewer.on_waypoint_removed = self.on_waypoint_removed
         self.viewer.on_waypoints_reindexed = self.on_waypoints_reindexed
 
+    def clear_state(self):
+        self.viewer.unload_image()
+        self.coord_list.clear()
+        self.rotation_spin.setValue(0.0)
+        self.rgb_combo.setCurrentIndex(0)
+
     def handle_import(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择 TIF 影像", "", "GeoTIFF (*.tif *.tiff)")
         if not file_path:
@@ -366,6 +372,13 @@ class PyramidBuildPage(QWidget):
     def _bind_events(self):
         self.browse_btn.clicked.connect(self.choose_file)
         self.build_btn.clicked.connect(self.start_build)
+
+    def clear_state(self):
+        self.file_edit.clear()
+        self.status_label.setText("等待选择文件")
+        self.progress_bar.setValue(0)
+        self.build_btn.setEnabled(True)
+        self._has_overview = False
 
     def choose_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "选择 TIF 影像", "", "GeoTIFF (*.tif *.tiff)")
@@ -554,6 +567,18 @@ class RegistrationPage(QWidget):
 
         self.src_viewer.on_points_changed = self.on_src_points_changed
         self.target_viewer.on_points_changed = self.on_target_points_changed
+
+    def clear_state(self):
+        self.src_viewer.unload_image()
+        self.target_viewer.unload_image()
+        self.src_tif_path = ""
+        self.target_tif_path = ""
+        self.src_path_edit.clear()
+        self.target_path_edit.clear()
+        self.src_count_label.setText("src 点: 0")
+        self.target_count_label.setText("target 点: 0")
+        self.status_label.setText("请选择 src 与 target 图像，然后按顺序选点")
+        self.progress_bar.setValue(0)
 
     def choose_src(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择 src 图像", "", "GeoTIFF (*.tif *.tiff)")
@@ -756,6 +781,18 @@ class ImageCropPage(QWidget):
         )
         self.rotation_spin.valueChanged.connect(self.viewer.set_display_rotation)
         self.viewer.on_polygon_changed = self.on_polygon_changed
+
+    def clear_state(self):
+        self.viewer.unload_image()
+        self.tif_path = ""
+        self.tif_path_edit.clear()
+        self.output_path_edit.clear()
+        self.status_label.setText("左键绘制多边形顶点，右键撤销最后一个点")
+        self.progress_bar.setValue(0)
+        self.vertex_count_label.setText("顶点数: 0")
+        self.overwrite_check.setChecked(False)
+        self.rotation_spin.setValue(0.0)
+        self.rgb_combo.setCurrentIndex(0)
 
     def choose_tif(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择待裁剪影像", "", "GeoTIFF (*.tif *.tiff)")
@@ -986,6 +1023,20 @@ class PlotCropPage(QWidget):
         self.rotation_spin.valueChanged.connect(self.viewer.set_display_rotation)
         self.viewer.on_polygon_changed = self.on_polygon_changed
         self.viewer.on_polygon_finish_requested = self.add_current_plot
+
+    def clear_state(self):
+        self.viewer.unload_image()
+        self.tif_path = ""
+        self.tif_path_edit.clear()
+        self.output_dir_edit.clear()
+        self.plot_polygons = []
+        self.plot_list.clear()
+        self.status_label.setText("流程: 绘制并添加小区 -> 选择输出文件夹 -> 批量裁剪")
+        self.progress_bar.setValue(0)
+        self.vertex_count_label.setText("顶点数: 0")
+        self.export_png_check.setChecked(False)
+        self.rotation_spin.setValue(0.0)
+        self.rgb_combo.setCurrentIndex(0)
 
     def choose_tif(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择待裁剪影像", "", "GeoTIFF (*.tif *.tiff)")
@@ -1406,8 +1457,31 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.plot_crop_page)
         self.stack.setCurrentIndex(0)
 
-        self.tab_bar.currentChanged.connect(self.stack.setCurrentIndex)
+        self._current_index = 0
+        self.tab_bar.currentChanged.connect(self.on_tab_changed)
 
         root.addWidget(self.tab_bar, 0)
         root.addWidget(self.stack)
         self.setCentralWidget(container)
+
+    def on_tab_changed(self, index: int):
+        self._clear_page(index)
+        self.stack.setCurrentIndex(index)
+        self._current_index = index
+
+    def _clear_page(self, index: int):
+        if index == 0:
+            self.draw_page.clear_state()
+            return
+        if index == 1:
+            self.pyramid_page.clear_state()
+            return
+        if index == 2:
+            self.registration_page.clear_state()
+            return
+        if index == 3:
+            self.image_crop_page.clear_state()
+            return
+        if index == 4:
+            self.plot_crop_page.clear_state()
+            return
