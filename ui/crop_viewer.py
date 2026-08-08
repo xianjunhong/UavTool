@@ -2,17 +2,30 @@ import math
 from typing import List, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPoint, QRectF, QTimer, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QTimer, Qt
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
+    QGraphicsEllipseItem,
     QGraphicsItem,
+    QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView,
+    QLabel,
 )
 
+from logic.plot_grid import plots_from_dividers, redistribute_column_dividers
 from utils.env_setup import configure_runtime_env
 
 configure_runtime_env()
@@ -42,6 +55,57 @@ class VertexMarker(QGraphicsItem):
         painter.drawEllipse(-r, -r, r * 2, r * 2)
 
 
+class OverlayBadgeItem(QGraphicsItem):
+    def __init__(
+        self,
+        text: str,
+        background: QColor,
+        foreground: QColor,
+        font_size: int = 12,
+        padding_x: int = 7,
+        padding_y: int = 4,
+    ):
+        super().__init__()
+        self.text = str(text)
+        self.background = QColor(background)
+        self.foreground = QColor(foreground)
+        self.border = QColor(255, 255, 255, 220)
+        self.font = QFont("Microsoft YaHei", font_size, QFont.Black)
+        self.padding_x = padding_x
+        self.padding_y = padding_y
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+
+    def set_text(self, text: str):
+        text = str(text)
+        if text == self.text:
+            return
+        self.prepareGeometryChange()
+        self.text = text
+        self.update()
+
+    def set_colors(self, background: QColor, foreground: QColor):
+        self.background = QColor(background)
+        self.foreground = QColor(foreground)
+        self.update()
+
+    def boundingRect(self):
+        metrics = QFontMetricsF(self.font)
+        text_rect = metrics.boundingRect(self.text or " ")
+        width = max(28.0, text_rect.width() + self.padding_x * 2)
+        height = max(24.0, text_rect.height() + self.padding_y * 2)
+        return QRectF(-width / 2, -height / 2, width, height)
+
+    def paint(self, painter: QPainter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.boundingRect()
+        painter.setPen(QPen(self.border, 1.5))
+        painter.setBrush(self.background)
+        painter.drawRoundedRect(rect, 7, 7)
+        painter.setFont(self.font)
+        painter.setPen(self.foreground)
+        painter.drawText(rect, Qt.AlignCenter, self.text)
+
+
 class CropViewer(QGraphicsView):
     def __init__(self):
         super().__init__()
@@ -50,6 +114,8 @@ class CropViewer(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setDragMode(QGraphicsView.NoDrag)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
 
         self.scene_obj = QGraphicsScene(self)
         self.setScene(self.scene_obj)
@@ -73,7 +139,9 @@ class CropViewer(QGraphicsView):
 
         self.saved_polygon_items: List[QGraphicsPathItem] = []
         self.saved_label_items: List[QGraphicsSimpleTextItem] = []
+        self.saved_polygon_item_indices = []
         self.saved_polygons_pixels = []
+        self.selected_saved_polygon_index = -1
 
         self.update_timer = QTimer()
         self.update_timer.setSingleShot(True)
@@ -83,13 +151,46 @@ class CropViewer(QGraphicsView):
         self._press_pos = QPoint()
         self._last_pan_pos = QPoint()
         self._dragging = False
+        self._drag_vertex_index = -1
         self._skip_release_add_once = False
+        self._polygon_history = []
+        self._restoring_polygon = False
+
+        self.column_edit_active = False
+        self.column_dividers = []
+        self.column_start_end = "a"
+        self.column_plot_items = []
+        self.column_divider_items = []
+        self.column_handle_items = []
+        self.column_endpoint_labels = []
+        self.column_name_items = []
+        self.column_direction_items = []
+        self.column_plot_names = []
+        self.column_selected_plot_index = 0
+        self.column_selected_divider_index = -1
+        self._column_history = []
+        self._column_drag = None
+        self._column_hover = None
 
         self.on_polygon_changed = None
+        self.on_polygon_geometry_changed = None
         self.on_polygon_finish_requested = None
+        self.on_saved_polygon_clicked = None
+        self.on_edit_cancel_requested = None
+        self.on_column_changed = None
+        self.on_column_plot_selected = None
+        self.on_column_cancel_requested = None
         self.display_rotation_deg = 0.0
         self.display_rgb_bands = None
         self._display_band_ranges = {}
+
+        self.magnifier_label = QLabel(self.viewport())
+        self.magnifier_label.setFixedSize(168, 168)
+        self.magnifier_label.setStyleSheet(
+            "QLabel { background: white; border: 2px solid #00b7ff; padding: 2px; }"
+        )
+        self.magnifier_label.setAlignment(Qt.AlignCenter)
+        self.magnifier_label.hide()
 
     def has_image(self) -> bool:
         return self.ds is not None
@@ -230,6 +331,7 @@ class CropViewer(QGraphicsView):
         return self._to_uint8_gray(a)
 
     def reset_view(self):
+        self.stop_column_edit()
         self.resetTransform()
         self.scene_obj.clear()
         self.base_item = None
@@ -247,7 +349,12 @@ class CropViewer(QGraphicsView):
 
         self.saved_polygon_items = []
         self.saved_label_items = []
+        self.saved_polygon_item_indices = []
         self.saved_polygons_pixels = []
+        self.selected_saved_polygon_index = -1
+        self._polygon_history = []
+        self._drag_vertex_index = -1
+        self.magnifier_label.hide()
 
         self._notify_polygon_changed()
 
@@ -380,21 +487,827 @@ class CropViewer(QGraphicsView):
         item.setZValue(0)
         return item
 
+    @staticmethod
+    def _copy_dividers(dividers):
+        return [
+            (
+                (float(left[0]), float(left[1])),
+                (float(right[0]), float(right[1])),
+            )
+            for left, right in dividers
+        ]
+
+    def get_column_dividers(self):
+        return self._copy_dividers(self.column_dividers)
+
+    def start_column_edit(
+        self,
+        dividers,
+        start_end: str = "a",
+        plot_names=None,
+    ):
+        normalized = self._copy_dividers(dividers)
+        if len(normalized) < 2:
+            raise ValueError("整列至少需要1个小区")
+        if not self._column_geometry_is_valid(normalized):
+            raise ValueError("整列边界或分隔线无效")
+
+        self.clear_polygon()
+        self.stop_column_edit()
+        self.column_edit_active = True
+        self.column_dividers = normalized
+        self.column_start_end = "b" if str(start_end).lower() == "b" else "a"
+        self.column_plot_names = [str(name) for name in (plot_names or [])]
+        self.column_selected_plot_index = (
+            len(normalized) - 2 if self.column_start_end == "b" else 0
+        )
+        self.column_selected_divider_index = -1
+        self._column_history = []
+        self._column_drag = None
+        self._column_hover = None
+        self._refresh_column_editor(force_rebuild=True)
+        self.setFocus()
+
+    def stop_column_edit(self):
+        self._clear_column_graphics()
+        self.column_edit_active = False
+        self.column_dividers = []
+        self.column_plot_names = []
+        self.column_selected_plot_index = 0
+        self.column_selected_divider_index = -1
+        self._column_history = []
+        self._column_drag = None
+        self._column_hover = None
+        if hasattr(self, "magnifier_label"):
+            self.magnifier_label.hide()
+
+    def _clear_column_graphics(self):
+        groups = [
+            self.column_plot_items,
+            self.column_divider_items,
+            self.column_handle_items,
+            self.column_endpoint_labels,
+            self.column_name_items,
+            self.column_direction_items,
+        ]
+        for group in groups:
+            for item in group:
+                if item.scene() is self.scene_obj:
+                    self.scene_obj.removeItem(item)
+            group.clear()
+
+    def _make_cosmetic_pen(self, color: QColor, width: float) -> QPen:
+        pen = QPen(color, width)
+        pen.setCosmetic(True)
+        return pen
+
+    def _refresh_column_editor(self, force_rebuild: bool = False):
+        if not self.column_edit_active or len(self.column_dividers) < 2:
+            return
+
+        plot_count = len(self.column_dividers) - 1
+        expected_handles = len(self.column_dividers) * 2
+        if (
+            force_rebuild
+            or len(self.column_plot_items) != plot_count
+            or len(self.column_divider_items) != len(self.column_dividers)
+            or len(self.column_handle_items) != expected_handles
+            or len(self.column_endpoint_labels) != 2
+            or len(self.column_name_items) != plot_count
+        ):
+            self._clear_column_graphics()
+
+            for _ in range(plot_count):
+                item = QGraphicsPathItem()
+                item.setZValue(35)
+                self.scene_obj.addItem(item)
+                self.column_plot_items.append(item)
+
+            for _ in self.column_dividers:
+                item = QGraphicsLineItem()
+                item.setZValue(38)
+                self.scene_obj.addItem(item)
+                self.column_divider_items.append(item)
+
+            for _ in range(expected_handles):
+                item = QGraphicsEllipseItem(-7, -7, 14, 14)
+                item.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+                item.setZValue(42)
+                self.scene_obj.addItem(item)
+                self.column_handle_items.append(item)
+
+            endpoint_a = OverlayBadgeItem(
+                "A端",
+                QColor(0, 165, 90, 245),
+                QColor(255, 255, 255),
+                font_size=16,
+                padding_x=10,
+                padding_y=6,
+            )
+            endpoint_b = OverlayBadgeItem(
+                "B端",
+                QColor(25, 105, 225, 245),
+                QColor(255, 255, 255),
+                font_size=16,
+                padding_x=10,
+                padding_y=6,
+            )
+            for item in (endpoint_a, endpoint_b):
+                item.setZValue(47)
+                self.scene_obj.addItem(item)
+                self.column_endpoint_labels.append(item)
+
+            for _ in range(plot_count):
+                item = OverlayBadgeItem(
+                    "",
+                    QColor(15, 15, 15, 205),
+                    QColor(255, 255, 255),
+                    font_size=12,
+                    padding_x=7,
+                    padding_y=4,
+                )
+                item.setZValue(46)
+                self.scene_obj.addItem(item)
+                self.column_name_items.append(item)
+
+            arrow_line = QGraphicsLineItem()
+            arrow_line.setZValue(44)
+            self.scene_obj.addItem(arrow_line)
+            arrow_head = QGraphicsPathItem()
+            arrow_head.setZValue(44)
+            self.scene_obj.addItem(arrow_head)
+            self.column_direction_items.extend([arrow_line, arrow_head])
+
+        plots = plots_from_dividers(self.column_dividers)
+        for index, (item, vertices) in enumerate(zip(self.column_plot_items, plots)):
+            path = self._path_from_vertices(vertices)
+            item.setPath(path)
+            if index == self.column_selected_plot_index:
+                item.setPen(self._make_cosmetic_pen(QColor(0, 210, 255, 235), 3))
+                item.setBrush(QColor(0, 190, 255, 65))
+            else:
+                item.setPen(self._make_cosmetic_pen(QColor(255, 75, 35, 235), 2.5))
+                item.setBrush(QColor(0, 0, 0, 0))
+
+        for index, (item, vertices) in enumerate(zip(self.column_name_items, plots)):
+            name = (
+                self.column_plot_names[index]
+                if index < len(self.column_plot_names)
+                else f"小区 {index + 1}"
+            )
+            item.set_text(name)
+            item.setPos(*self._polygon_center(vertices))
+            if index == self.column_selected_plot_index:
+                item.set_colors(
+                    QColor(0, 115, 165, 235),
+                    QColor(255, 255, 255),
+                )
+            else:
+                item.set_colors(
+                    QColor(15, 15, 15, 205),
+                    QColor(255, 255, 255),
+                )
+
+        for index, (item, divider) in enumerate(
+            zip(self.column_divider_items, self.column_dividers)
+        ):
+            left, right = divider
+            item.setLine(left[0], left[1], right[0], right[1])
+            is_hovered = self._column_hover == ("divider", index)
+            is_selected = index == self.column_selected_divider_index
+            if is_hovered or is_selected:
+                color = QColor(255, 70, 70, 255)
+                width = 4
+            elif index in (0, len(self.column_dividers) - 1):
+                color = QColor(30, 230, 120, 245)
+                width = 3
+            else:
+                color = QColor(255, 220, 0, 235)
+                width = 2.5
+            item.setPen(self._make_cosmetic_pen(color, width))
+
+        for divider_index, divider in enumerate(self.column_dividers):
+            for side, point in enumerate(divider):
+                handle_index = divider_index * 2 + side
+                item = self.column_handle_items[handle_index]
+                item.setPos(point[0], point[1])
+                is_hovered = self._column_hover == (
+                    "handle",
+                    divider_index,
+                    side,
+                )
+                outer = divider_index in (0, len(self.column_dividers) - 1)
+                radius = 9 if is_hovered else (8 if outer else 7)
+                item.setRect(-radius, -radius, radius * 2, radius * 2)
+                item.setPen(
+                    self._make_cosmetic_pen(
+                        QColor(255, 255, 255) if is_hovered else QColor(30, 30, 30),
+                        2,
+                    )
+                )
+                if is_hovered:
+                    item.setBrush(QColor(255, 70, 70))
+                elif outer:
+                    item.setBrush(QColor(30, 230, 120))
+                else:
+                    item.setBrush(QColor(255, 210, 0))
+
+        self._refresh_column_direction_overlay(plots)
+
+    def _path_from_vertices(self, vertices):
+        path = QPainterPath()
+        if not vertices:
+            return path
+        path.moveTo(vertices[0][0], vertices[0][1])
+        for x, y in vertices[1:]:
+            path.lineTo(x, y)
+        path.closeSubpath()
+        return path
+
+    def _refresh_column_direction_overlay(self, plots):
+        if not self.column_endpoint_labels or len(self.column_direction_items) != 2:
+            return
+
+        first_center = self._divider_center(self.column_dividers[0])
+        last_center = self._divider_center(self.column_dividers[-1])
+        axis_x = last_center[0] - first_center[0]
+        axis_y = last_center[1] - first_center[1]
+        axis_length = max(1e-9, math.hypot(axis_x, axis_y))
+        unit_x, unit_y = axis_x / axis_length, axis_y / axis_length
+        perpendicular_x, perpendicular_y = -unit_y, unit_x
+
+        view_scale = max(
+            1e-6,
+            (self.transform().m11() ** 2 + self.transform().m21() ** 2) ** 0.5,
+        )
+        half_width = max(
+            math.hypot(
+                point[0] - center[0],
+                point[1] - center[1],
+            )
+            for divider, center in (
+                (self.column_dividers[0], first_center),
+                (self.column_dividers[-1], last_center),
+            )
+            for point in divider
+        )
+        side_offset = half_width + 52.0 / view_scale
+        end_offset = 18.0 / view_scale
+
+        def badge_positions(side_sign):
+            return (
+                (
+                    first_center[0]
+                    + perpendicular_x * side_offset * side_sign
+                    - unit_x * end_offset,
+                    first_center[1]
+                    + perpendicular_y * side_offset * side_sign
+                    - unit_y * end_offset,
+                ),
+                (
+                    last_center[0]
+                    + perpendicular_x * side_offset * side_sign
+                    + unit_x * end_offset,
+                    last_center[1]
+                    + perpendicular_y * side_offset * side_sign
+                    + unit_y * end_offset,
+                ),
+            )
+
+        def boundary_clearance(positions):
+            clearances = []
+            for x, y in positions:
+                clearances.extend([x, y, self.full_w - x, self.full_h - y])
+            return min(clearances)
+
+        positive_positions = badge_positions(1.0)
+        negative_positions = badge_positions(-1.0)
+        if boundary_clearance(negative_positions) > boundary_clearance(positive_positions):
+            badge_a_pos, badge_b_pos = negative_positions
+        else:
+            badge_a_pos, badge_b_pos = positive_positions
+
+        label_a, label_b = self.column_endpoint_labels
+        label_a.setPos(*badge_a_pos)
+        label_b.setPos(*badge_b_pos)
+
+        if self.column_start_end == "a":
+            start_center, end_center = badge_a_pos, badge_b_pos
+            label_a.set_text("A端 · 起点")
+            label_b.set_text("B端")
+        else:
+            start_center, end_center = badge_b_pos, badge_a_pos
+            label_a.set_text("A端")
+            label_b.set_text("B端 · 起点")
+
+        arrow_line, arrow_head = self.column_direction_items
+        arrow_line.setLine(
+            start_center[0],
+            start_center[1],
+            end_center[0],
+            end_center[1],
+        )
+        arrow_line.setPen(self._make_cosmetic_pen(QColor(255, 55, 180, 245), 4.5))
+
+        dx = end_center[0] - start_center[0]
+        dy = end_center[1] - start_center[1]
+        length = max(1e-9, math.hypot(dx, dy))
+        ux, uy = dx / length, dy / length
+        size = 20.0 / view_scale
+        tip_x = start_center[0] + dx * 0.62
+        tip_y = start_center[1] + dy * 0.62
+        base_x = tip_x - ux * size
+        base_y = tip_y - uy * size
+        perp_x, perp_y = -uy, ux
+        head_path = QPainterPath(QPointF(tip_x, tip_y))
+        head_path.lineTo(
+            base_x + perp_x * size * 0.55,
+            base_y + perp_y * size * 0.55,
+        )
+        head_path.lineTo(
+            base_x - perp_x * size * 0.55,
+            base_y - perp_y * size * 0.55,
+        )
+        head_path.closeSubpath()
+        arrow_head.setPath(head_path)
+        arrow_head.setPen(self._make_cosmetic_pen(QColor(255, 55, 180), 1))
+        arrow_head.setBrush(QColor(255, 55, 180))
+
+    @staticmethod
+    def _divider_center(divider):
+        left, right = divider
+        return ((left[0] + right[0]) * 0.5, (left[1] + right[1]) * 0.5)
+
+    @staticmethod
+    def _center_text_item(item, center):
+        bounds = item.boundingRect()
+        item.setPos(center[0] - bounds.width() / 2, center[1] - bounds.height() / 2)
+
+    def _push_column_history(self):
+        snapshot = (self.get_column_dividers(), self.column_start_end)
+        if self._column_history and self._column_history[-1] == snapshot:
+            return
+        self._column_history.append(snapshot)
+        if len(self._column_history) > 50:
+            self._column_history.pop(0)
+
+    def undo_column_edit(self):
+        if not self.column_edit_active or not self._column_history:
+            return False
+        dividers, start_end = self._column_history.pop()
+        self.column_dividers = self._copy_dividers(dividers)
+        self.column_start_end = start_end
+        self.column_selected_plot_index = min(
+            self.column_selected_plot_index,
+            len(self.column_dividers) - 2,
+        )
+        self.column_selected_divider_index = -1
+        self._refresh_column_editor(force_rebuild=True)
+        self._emit_column_changed(final=True)
+        return True
+
+    def redistribute_column(self):
+        if not self.column_edit_active:
+            return False
+        self._push_column_history()
+        self.column_dividers = redistribute_column_dividers(self.column_dividers)
+        self._refresh_column_editor()
+        self._emit_column_changed(final=True)
+        return True
+
+    def add_column_divider(self):
+        if not self.column_edit_active:
+            return False
+        plot_index = max(
+            0,
+            min(self.column_selected_plot_index, len(self.column_dividers) - 2),
+        )
+        self._push_column_history()
+        top = self.column_dividers[plot_index]
+        bottom = self.column_dividers[plot_index + 1]
+        midpoint = (
+            (
+                (top[0][0] + bottom[0][0]) * 0.5,
+                (top[0][1] + bottom[0][1]) * 0.5,
+            ),
+            (
+                (top[1][0] + bottom[1][0]) * 0.5,
+                (top[1][1] + bottom[1][1]) * 0.5,
+            ),
+        )
+        self.column_dividers.insert(plot_index + 1, midpoint)
+        self.column_selected_plot_index = plot_index
+        self.column_selected_divider_index = plot_index + 1
+        self._refresh_column_editor(force_rebuild=True)
+        self._emit_column_changed(final=True)
+        return True
+
+    def delete_selected_column_divider(self):
+        if not self.column_edit_active:
+            return False
+        index = self.column_selected_divider_index
+        if index <= 0 or index >= len(self.column_dividers) - 1:
+            return False
+        self._push_column_history()
+        self.column_dividers.pop(index)
+        self.column_selected_divider_index = -1
+        self.column_selected_plot_index = min(
+            self.column_selected_plot_index,
+            len(self.column_dividers) - 2,
+        )
+        self._refresh_column_editor(force_rebuild=True)
+        self._emit_column_changed(final=True)
+        return True
+
+    def reverse_column_direction(self):
+        if not self.column_edit_active:
+            return False
+        self._push_column_history()
+        self.column_start_end = "b" if self.column_start_end == "a" else "a"
+        self.column_selected_plot_index = (
+            len(self.column_dividers) - 2 - self.column_selected_plot_index
+        )
+        self._refresh_column_editor()
+        self._emit_column_changed(final=True)
+        return True
+
+    def set_selected_column_plot(self, index: int, notify: bool = False):
+        if not self.column_edit_active:
+            return
+        index = max(0, min(int(index), len(self.column_dividers) - 2))
+        self.column_selected_plot_index = index
+        self._refresh_column_editor()
+        if notify and callable(self.on_column_plot_selected):
+            self.on_column_plot_selected(index)
+
+    def set_column_plot_names(self, names):
+        normalized = [str(name) for name in names]
+        if normalized == self.column_plot_names:
+            return
+        self.column_plot_names = normalized
+        self._refresh_column_editor()
+
+    def _emit_column_changed(self, final: bool):
+        if callable(self.on_column_changed):
+            self.on_column_changed(
+                self.get_column_dividers(),
+                self.column_start_end,
+                bool(final),
+            )
+
+    def _column_handle_at(self, view_pos: QPoint):
+        nearest = None
+        nearest_distance = float("inf")
+        for divider_index, divider in enumerate(self.column_dividers):
+            for side, point in enumerate(divider):
+                point_view = self.mapFromScene(QPointF(point[0], point[1]))
+                distance = math.hypot(
+                    point_view.x() - view_pos.x(),
+                    point_view.y() - view_pos.y(),
+                )
+                if distance <= 14.0 and distance < nearest_distance:
+                    nearest = (divider_index, side)
+                    nearest_distance = distance
+        return nearest
+
+    def _column_divider_at(self, view_pos: QPoint):
+        nearest = -1
+        nearest_distance = float("inf")
+        for index, (left, right) in enumerate(self.column_dividers):
+            p1 = self.mapFromScene(QPointF(left[0], left[1]))
+            p2 = self.mapFromScene(QPointF(right[0], right[1]))
+            distance = self._distance_point_to_segment(
+                view_pos.x(),
+                view_pos.y(),
+                p1.x(),
+                p1.y(),
+                p2.x(),
+                p2.y(),
+            )
+            if distance <= 9.0 and distance < nearest_distance:
+                nearest = index
+                nearest_distance = distance
+        return nearest
+
+    def _column_plot_at(self, scene_pos: QPointF):
+        for index, vertices in enumerate(plots_from_dividers(self.column_dividers)):
+            if self._path_from_vertices(vertices).contains(scene_pos):
+                return index
+        return -1
+
+    @staticmethod
+    def _distance_point_to_segment(px, py, x1, y1, x2, y2):
+        dx = x2 - x1
+        dy = y2 - y1
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-12:
+            return math.hypot(px - x1, py - y1)
+        t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+        return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    def _begin_column_interaction(self, event):
+        view_pos = event.pos()
+        scene_pos = self.mapToScene(view_pos)
+
+        handle = self._column_handle_at(view_pos)
+        if handle is not None:
+            self._push_column_history()
+            divider_index, side = handle
+            self._column_drag = {
+                "kind": "handle",
+                "divider": divider_index,
+                "side": side,
+                "start_scene": scene_pos,
+                "origin": self.get_column_dividers(),
+            }
+            self.setCursor(Qt.SizeAllCursor)
+            return True
+
+        divider_index = self._column_divider_at(view_pos)
+        if divider_index >= 0:
+            self._push_column_history()
+            self.column_selected_divider_index = divider_index
+            self._column_drag = {
+                "kind": "divider",
+                "divider": divider_index,
+                "start_scene": scene_pos,
+                "origin": self.get_column_dividers(),
+            }
+            self._refresh_column_editor()
+            self.setCursor(Qt.SizeAllCursor)
+            return True
+
+        plot_index = self._column_plot_at(scene_pos)
+        if plot_index >= 0:
+            self.column_selected_plot_index = plot_index
+            self.column_selected_divider_index = -1
+            self._column_drag = {
+                "kind": "whole_pending",
+                "plot": plot_index,
+                "start_scene": scene_pos,
+                "start_view": QPoint(view_pos),
+                "origin": self.get_column_dividers(),
+            }
+            self._refresh_column_editor()
+            self.setCursor(Qt.OpenHandCursor)
+            return True
+
+        return False
+
+    def _update_column_drag(self, event):
+        if not self._column_drag:
+            return False
+
+        drag = self._column_drag
+        scene_pos = self.mapToScene(event.pos())
+        origin = drag["origin"]
+        start_scene = drag["start_scene"]
+        dx = scene_pos.x() - start_scene.x()
+        dy = scene_pos.y() - start_scene.y()
+
+        if drag["kind"] == "whole_pending":
+            if (event.pos() - drag["start_view"]).manhattanLength() < 5:
+                return True
+            self._push_column_history()
+            drag["kind"] = "whole"
+            self.setCursor(Qt.ClosedHandCursor)
+
+        if drag["kind"] == "whole":
+            all_points = [point for divider in origin for point in divider]
+            min_x = min(p[0] for p in all_points)
+            max_x = max(p[0] for p in all_points)
+            min_y = min(p[1] for p in all_points)
+            max_y = max(p[1] for p in all_points)
+            dx = max(-min_x, min(dx, self.full_w - 1 - max_x))
+            dy = max(-min_y, min(dy, self.full_h - 1 - max_y))
+            self.column_dividers = [
+                (
+                    (left[0] + dx, left[1] + dy),
+                    (right[0] + dx, right[1] + dy),
+                )
+                for left, right in origin
+            ]
+
+        elif drag["kind"] == "divider":
+            self.column_dividers = self._copy_dividers(origin)
+            index = drag["divider"]
+            left, right = origin[index]
+            self.column_dividers[index] = (
+                self._clamp_scene_point(left[0] + dx, left[1] + dy),
+                self._clamp_scene_point(right[0] + dx, right[1] + dy),
+            )
+            if 0 < index < len(origin) - 1:
+                self._constrain_internal_divider(index)
+
+        elif drag["kind"] == "handle":
+            self.column_dividers = self._copy_dividers(origin)
+            index = drag["divider"]
+            side = drag["side"]
+            moved = self._clamp_scene_point(scene_pos.x(), scene_pos.y())
+            if index in (0, len(origin) - 1):
+                self._move_outer_column_corner(origin, index, side, moved)
+            else:
+                current = list(self.column_dividers[index])
+                current[side] = moved
+                self.column_dividers[index] = tuple(current)
+                self._constrain_internal_divider(index, sides=(side,))
+
+        if self._column_geometry_is_valid(self.column_dividers):
+            drag["last_valid"] = self.get_column_dividers()
+        else:
+            self.column_dividers = self._copy_dividers(
+                drag.get("last_valid", origin)
+            )
+
+        self._refresh_column_editor()
+        self._emit_column_changed(final=False)
+        self._show_magnifier(event.pos())
+        return True
+
+    def _move_outer_column_corner(self, origin, divider_index, side, moved):
+        count = len(origin) - 1
+        old_start = origin[0][side]
+        old_end = origin[-1][side]
+        new_start = moved if divider_index == 0 else old_start
+        new_end = moved if divider_index == count else old_end
+
+        for index in range(count + 1):
+            t = index / count
+            base_old = (
+                old_start[0] + (old_end[0] - old_start[0]) * t,
+                old_start[1] + (old_end[1] - old_start[1]) * t,
+            )
+            residual = (
+                origin[index][side][0] - base_old[0],
+                origin[index][side][1] - base_old[1],
+            )
+            base_new = (
+                new_start[0] + (new_end[0] - new_start[0]) * t,
+                new_start[1] + (new_end[1] - new_start[1]) * t,
+            )
+            new_point = self._clamp_scene_point(
+                base_new[0] + residual[0],
+                base_new[1] + residual[1],
+            )
+            current = list(self.column_dividers[index])
+            current[side] = new_point
+            self.column_dividers[index] = tuple(current)
+
+    def _constrain_internal_divider(self, divider_index, sides=(0, 1)):
+        for side in sides:
+            previous = self.column_dividers[divider_index - 1][side]
+            current = self.column_dividers[divider_index][side]
+            following = self.column_dividers[divider_index + 1][side]
+            axis_x = following[0] - previous[0]
+            axis_y = following[1] - previous[1]
+            axis_len_sq = axis_x * axis_x + axis_y * axis_y
+            if axis_len_sq <= 1e-12:
+                continue
+            t = (
+                (current[0] - previous[0]) * axis_x
+                + (current[1] - previous[1]) * axis_y
+            ) / axis_len_sq
+            clamped_t = max(0.03, min(0.97, t))
+            if abs(clamped_t - t) <= 1e-12:
+                continue
+            correction_x = (clamped_t - t) * axis_x
+            correction_y = (clamped_t - t) * axis_y
+            adjusted = self._clamp_scene_point(
+                current[0] + correction_x,
+                current[1] + correction_y,
+            )
+            divider = list(self.column_dividers[divider_index])
+            divider[side] = adjusted
+            self.column_dividers[divider_index] = tuple(divider)
+
+    def _column_geometry_is_valid(self, dividers):
+        try:
+            plots = plots_from_dividers(dividers)
+        except Exception:
+            return False
+        for vertices in plots:
+            area_twice = 0.0
+            for index, point in enumerate(vertices):
+                next_point = vertices[(index + 1) % len(vertices)]
+                area_twice += point[0] * next_point[1] - next_point[0] * point[1]
+            if abs(area_twice) <= 1e-6 or self._is_self_intersecting(vertices):
+                return False
+        return True
+
+    def _finish_column_interaction(self):
+        if not self._column_drag:
+            return False
+        drag = self._column_drag
+        self._column_drag = None
+        self.unsetCursor()
+        self.magnifier_label.hide()
+
+        if drag["kind"] == "whole_pending":
+            plot_index = drag["plot"]
+            self.set_selected_column_plot(plot_index, notify=True)
+            return True
+
+        self._emit_column_changed(final=True)
+        return True
+
+    def _clamp_scene_point(self, x, y):
+        return (
+            max(0.0, min(float(self.full_w - 1), float(x))),
+            max(0.0, min(float(self.full_h - 1), float(y))),
+        )
+
+    def _update_column_hover(self, view_pos: QPoint):
+        hover = None
+        handle = self._column_handle_at(view_pos)
+        if handle is not None:
+            hover = ("handle", handle[0], handle[1])
+            self.setCursor(Qt.SizeAllCursor)
+        else:
+            divider_index = self._column_divider_at(view_pos)
+            if divider_index >= 0:
+                hover = ("divider", divider_index)
+                self.setCursor(Qt.SizeAllCursor)
+            elif self._column_plot_at(self.mapToScene(view_pos)) >= 0:
+                self.setCursor(Qt.OpenHandCursor)
+            else:
+                self.unsetCursor()
+
+        if hover != self._column_hover:
+            self._column_hover = hover
+            self._refresh_column_editor()
+
+    def _show_magnifier(self, view_pos: QPoint):
+        if self.viewport().width() <= 0 or self.viewport().height() <= 0:
+            return
+        sample_size = 72
+        half = sample_size // 2
+        sample_rect = QRect(
+            view_pos.x() - half,
+            view_pos.y() - half,
+            sample_size,
+            sample_size,
+        ).intersected(self.viewport().rect())
+        if sample_rect.isEmpty():
+            return
+
+        self.magnifier_label.hide()
+        pixmap = self.viewport().grab(sample_rect)
+        enlarged = pixmap.scaled(
+            160,
+            160,
+            Qt.KeepAspectRatio,
+            Qt.FastTransformation,
+        )
+        self.magnifier_label.setPixmap(enlarged)
+        x = max(4, self.viewport().width() - self.magnifier_label.width() - 8)
+        self.magnifier_label.move(x, 8)
+        self.magnifier_label.show()
+        self.magnifier_label.raise_()
+
     def wheelEvent(self, event):
         if self.ds is None:
             return
+
+        cursor_pos = event.position().toPoint()
+        scene_pos_before = self.mapToScene(cursor_pos)
         factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        previous_anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
         self.scale(factor, factor)
+        scene_pos_after = self.mapToScene(cursor_pos)
+        offset = scene_pos_after - scene_pos_before
+        self.translate(offset.x(), offset.y())
+        self.setTransformationAnchor(previous_anchor)
         self.update_timer.start(180)
+        if self.column_edit_active:
+            self._refresh_column_editor()
+        event.accept()
 
     def mousePressEvent(self, event):
         if self.ds is None:
+            return
+        self.setFocus()
+
+        if self.column_edit_active and event.button() == Qt.LeftButton:
+            self._begin_column_interaction(event)
+            event.accept()
             return
 
         # Some platforms may not emit the paired release after double click.
         # Clear stale skip state before handling a new left-button click.
         if event.button() == Qt.LeftButton and self._skip_release_add_once:
             self._skip_release_add_once = False
+
+        if event.button() == Qt.LeftButton:
+            vertex_index = self._vertex_index_at(event.pos())
+            if vertex_index >= 0:
+                self._push_polygon_history()
+                self._drag_vertex_index = vertex_index
+                self._press_button = Qt.NoButton
+                self._dragging = False
+                self.setCursor(Qt.SizeAllCursor)
+                event.accept()
+                return
 
         self._press_button = event.button()
         self._press_pos = event.pos()
@@ -407,6 +1320,27 @@ class CropViewer(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         if self.ds is None:
+            return
+
+        if self.column_edit_active:
+            if self._column_drag:
+                self._update_column_drag(event)
+            elif self._press_button == Qt.RightButton:
+                pass
+            else:
+                self._update_column_hover(event.pos())
+                event.accept()
+                return
+
+        if self._drag_vertex_index >= 0:
+            scene_pos = self.mapToScene(event.pos())
+            px = max(0.0, min(float(self.full_w - 1), scene_pos.x()))
+            py = max(0.0, min(float(self.full_h - 1), scene_pos.y()))
+            self.vertices[self._drag_vertex_index] = (px, py)
+            self.markers[self._drag_vertex_index].setPos(px, py)
+            self._refresh_polygon_path()
+            self._show_magnifier(event.pos())
+            event.accept()
             return
 
         if self._press_button in (Qt.LeftButton, Qt.RightButton):
@@ -429,6 +1363,19 @@ class CropViewer(QGraphicsView):
         if self.ds is None:
             return
 
+        if self.column_edit_active and self._column_drag:
+            self._finish_column_interaction()
+            event.accept()
+            return
+
+        if self._drag_vertex_index >= 0:
+            self._drag_vertex_index = -1
+            self.unsetCursor()
+            self.magnifier_label.hide()
+            self._notify_polygon_changed()
+            event.accept()
+            return
+
         release_scene = self.mapToScene(event.pos())
         was_dragging = self._dragging
         btn = self._press_button
@@ -447,6 +1394,11 @@ class CropViewer(QGraphicsView):
                 self._skip_release_add_once = False
                 event.accept()
                 return
+            saved_index = self._saved_polygon_index_at(release_scene)
+            if saved_index >= 0 and callable(self.on_saved_polygon_clicked):
+                self.on_saved_polygon_clicked(saved_index)
+                event.accept()
+                return
             self.add_vertex(release_scene.x(), release_scene.y())
             event.accept()
             return
@@ -462,6 +1414,10 @@ class CropViewer(QGraphicsView):
         if self.ds is None:
             return
 
+        if self.column_edit_active:
+            event.accept()
+            return
+
         if event.button() == Qt.LeftButton:
             # Ignore the paired release-add triggered by Qt on double click.
             self._skip_release_add_once = True
@@ -471,6 +1427,44 @@ class CropViewer(QGraphicsView):
             return
 
         super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Z and event.modifiers() & Qt.ControlModifier:
+            if self.column_edit_active:
+                self.undo_column_edit()
+            else:
+                self.undo_polygon_edit()
+            event.accept()
+            return
+
+        if event.key() == Qt.Key_Escape:
+            if self.column_edit_active and callable(self.on_column_cancel_requested):
+                self.on_column_cancel_requested()
+            elif callable(self.on_edit_cancel_requested):
+                self.on_edit_cancel_requested()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.magnifier_label.isVisible():
+            x = max(4, self.viewport().width() - self.magnifier_label.width() - 8)
+            self.magnifier_label.move(x, 8)
+
+    def _vertex_index_at(self, view_pos: QPoint) -> int:
+        nearest_index = -1
+        nearest_distance = float("inf")
+        for index, marker in enumerate(self.markers):
+            marker_view_pos = self.mapFromScene(marker.pos())
+            dx = marker_view_pos.x() - view_pos.x()
+            dy = marker_view_pos.y() - view_pos.y()
+            distance = math.hypot(dx, dy)
+            if distance <= 12.0 and distance < nearest_distance:
+                nearest_index = index
+                nearest_distance = distance
+        return nearest_index
 
     def update_resolution(self):
         if self.ds is None:
@@ -521,6 +1515,7 @@ class CropViewer(QGraphicsView):
     def add_vertex(self, px_x: float, px_y: float):
         if not (0 <= px_x < self.full_w and 0 <= px_y < self.full_h):
             return
+        self._push_polygon_history()
         self.vertices.append((px_x, px_y))
         marker = VertexMarker(px_x, px_y)
         self.scene_obj.addItem(marker)
@@ -531,6 +1526,7 @@ class CropViewer(QGraphicsView):
     def remove_last_vertex(self):
         if not self.vertices:
             return
+        self._push_polygon_history()
         self.vertices.pop()
         marker = self.markers.pop()
         self.scene_obj.removeItem(marker)
@@ -538,12 +1534,46 @@ class CropViewer(QGraphicsView):
         self._notify_polygon_changed()
 
     def clear_polygon(self):
+        if self.vertices:
+            self._push_polygon_history()
+        self._replace_polygon_vertices([])
+
+    def _replace_polygon_vertices(self, vertices):
+        self._drag_vertex_index = -1
         while self.markers:
             marker = self.markers.pop()
             self.scene_obj.removeItem(marker)
         self.vertices = []
+        for px_x, px_y in vertices:
+            if not (0 <= px_x < self.full_w and 0 <= px_y < self.full_h):
+                continue
+            self.vertices.append((float(px_x), float(px_y)))
+            marker = VertexMarker(px_x, px_y)
+            self.scene_obj.addItem(marker)
+            self.markers.append(marker)
         self._refresh_polygon_path()
         self._notify_polygon_changed()
+
+    def _push_polygon_history(self):
+        snapshot = [(float(x), float(y)) for x, y in self.vertices]
+        if self._polygon_history and self._polygon_history[-1] == snapshot:
+            return
+        self._polygon_history.append(snapshot)
+        if len(self._polygon_history) > 50:
+            self._polygon_history.pop(0)
+
+    def undo_polygon_edit(self):
+        if not self._polygon_history:
+            return False
+        vertices = self._polygon_history.pop()
+        self._restoring_polygon = True
+        try:
+            self._replace_polygon_vertices(vertices)
+        finally:
+            self._restoring_polygon = False
+        if callable(self.on_polygon_geometry_changed):
+            self.on_polygon_geometry_changed(list(self.vertices))
+        return True
 
     def _refresh_polygon_path(self):
         path = QPainterPath()
@@ -636,20 +1666,20 @@ class CropViewer(QGraphicsView):
         return list(self.vertices)
 
     def set_polygon_pixels(self, vertices: List[Tuple[float, float]]):
-        self.clear_polygon()
-        for px_x, px_y in vertices:
-            if not (0 <= px_x < self.full_w and 0 <= px_y < self.full_h):
-                continue
-            self.vertices.append((float(px_x), float(px_y)))
-            marker = VertexMarker(px_x, px_y)
-            self.scene_obj.addItem(marker)
-            self.markers.append(marker)
-        self._refresh_polygon_path()
-        self._notify_polygon_changed()
+        self._polygon_history = []
+        self._restoring_polygon = True
+        try:
+            self._replace_polygon_vertices(vertices)
+        finally:
+            self._restoring_polygon = False
 
     def set_saved_polygons(self, polygons_pixels):
         self.saved_polygons_pixels = list(polygons_pixels)
         self._rebuild_saved_overlay()
+
+    def set_selected_saved_polygon(self, polygon_index: int):
+        self.selected_saved_polygon_index = int(polygon_index)
+        self._update_saved_overlay_styles()
 
     def _rebuild_saved_overlay(self):
         for item in self.saved_polygon_items:
@@ -658,8 +1688,10 @@ class CropViewer(QGraphicsView):
             self.scene_obj.removeItem(item)
         self.saved_polygon_items = []
         self.saved_label_items = []
+        self.saved_polygon_item_indices = []
 
-        for entry in self.saved_polygons_pixels:
+        for fallback_index, entry in enumerate(self.saved_polygons_pixels):
+            polygon_index = int(entry.get("index", fallback_index))
             name = str(entry.get("name") or "")
             vertices = list(entry.get("pixels") or [])
             if len(vertices) < 3:
@@ -682,6 +1714,7 @@ class CropViewer(QGraphicsView):
             poly_item.setZValue(18)
             self.scene_obj.addItem(poly_item)
             self.saved_polygon_items.append(poly_item)
+            self.saved_polygon_item_indices.append(polygon_index)
 
             cx, cy = self._polygon_center(draw_vertices)
             label_item = QGraphicsSimpleTextItem(name)
@@ -694,6 +1727,40 @@ class CropViewer(QGraphicsView):
             label_item.setZValue(19)
             self.scene_obj.addItem(label_item)
             self.saved_label_items.append(label_item)
+
+        self._update_saved_overlay_styles()
+
+    def _update_saved_overlay_styles(self):
+        selected = self.selected_saved_polygon_index
+        has_selection = selected >= 0
+        for polygon_index, poly_item, label_item in zip(
+            self.saved_polygon_item_indices,
+            self.saved_polygon_items,
+            self.saved_label_items,
+        ):
+            is_selected = polygon_index == selected
+            if is_selected:
+                poly_item.setPen(self._make_cosmetic_pen(QColor(0, 220, 255, 245), 3))
+                poly_item.setBrush(QColor(0, 190, 255, 55))
+                label_item.setVisible(True)
+                label_item.setBrush(QColor(255, 255, 255))
+            elif has_selection:
+                poly_item.setPen(self._make_cosmetic_pen(QColor(255, 95, 30, 190), 2))
+                poly_item.setBrush(QColor(0, 0, 0, 0))
+                label_item.setVisible(False)
+            else:
+                poly_item.setPen(self._make_cosmetic_pen(QColor(255, 120, 0, 220), 2))
+                poly_item.setBrush(QColor(255, 120, 0, 35))
+                label_item.setVisible(True)
+                label_item.setBrush(QColor(20, 20, 20))
+
+    def _saved_polygon_index_at(self, scene_pos: QPointF) -> int:
+        for polygon_index, item in reversed(
+            list(zip(self.saved_polygon_item_indices, self.saved_polygon_items))
+        ):
+            if item.path().contains(scene_pos):
+                return polygon_index
+        return -1
 
     def _polygon_center(self, vertices: List[Tuple[float, float]]):
         x_sum = 0.0
@@ -736,3 +1803,8 @@ class CropViewer(QGraphicsView):
     def _notify_polygon_changed(self):
         if callable(self.on_polygon_changed):
             self.on_polygon_changed(len(self.vertices))
+        if (
+            not self._restoring_polygon
+            and callable(self.on_polygon_geometry_changed)
+        ):
+            self.on_polygon_geometry_changed(list(self.vertices))

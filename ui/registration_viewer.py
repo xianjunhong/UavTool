@@ -313,9 +313,19 @@ class RegistrationViewer(QGraphicsView):
     def wheelEvent(self, event):
         if self.ds is None:
             return
+
+        cursor_pos = event.position().toPoint()
+        scene_pos_before = self.mapToScene(cursor_pos)
         factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        previous_anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
         self.scale(factor, factor)
+        scene_pos_after = self.mapToScene(cursor_pos)
+        offset = scene_pos_after - scene_pos_before
+        self.translate(offset.x(), offset.y())
+        self.setTransformationAnchor(previous_anchor)
         self.update_timer.start(180)
+        event.accept()
 
     def mousePressEvent(self, event):
         if self.ds is None:

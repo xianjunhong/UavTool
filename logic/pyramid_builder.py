@@ -1,5 +1,6 @@
 from PySide6.QtCore import QObject, Signal
 
+from logic.overview_config import OVERVIEW_FACTORS, OVERVIEW_RESAMPLING
 from utils.env_setup import configure_runtime_env
 
 
@@ -71,14 +72,12 @@ class PyramidBuildWorker(QObject):
 
             self.progress.emit(0, "开始构建金字塔")
 
-            factors = [2, 4, 8, 16, 32, 64, 128]
-
             def callback(complete, message, _):
                 percent = int(max(0.0, min(1.0, complete)) * 100)
                 self.progress.emit(percent, "正在构建金字塔")
                 return 1
 
-            ds.BuildOverviews("AVERAGE", factors, callback=callback)
+            ds.BuildOverviews(OVERVIEW_RESAMPLING, OVERVIEW_FACTORS, callback=callback)
             ds.FlushCache()
             ds = None
 

@@ -58,8 +58,20 @@ def save_polygons_to_shapefile(
 		srs.ImportFromWkt(target_wkt)
 		_set_traditional_axis_order(srs)
 
-	layer = ds.CreateLayer("plots", srs=srs, geom_type=ogr.wkbPolygon)
+	layer = ds.CreateLayer(
+		"plots",
+		srs=srs,
+		geom_type=ogr.wkbPolygon,
+		options=["ENCODING=UTF-8"],
+	)
 	layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+	layer.CreateField(ogr.FieldDefn("column_id", ogr.OFTString))
+	layer.CreateField(ogr.FieldDefn("col_pos", ogr.OFTInteger))
+	layer.CreateField(ogr.FieldDefn("plot_idx", ogr.OFTInteger))
+	layer.CreateField(ogr.FieldDefn("start_end", ogr.OFTString))
+	layer.CreateField(ogr.FieldDefn("col_prefix", ogr.OFTString))
+	layer.CreateField(ogr.FieldDefn("col_start", ogr.OFTInteger))
+	layer.CreateField(ogr.FieldDefn("col_pad", ogr.OFTInteger))
 
 	defn = layer.GetLayerDefn()
 
@@ -82,6 +94,18 @@ def save_polygons_to_shapefile(
 
 		feat = ogr.Feature(defn)
 		feat.SetField("name", name)
+		for field_name, item_key in [
+			("column_id", "column_id"),
+			("col_pos", "column_position"),
+			("plot_idx", "plot_index"),
+			("start_end", "column_start_end"),
+			("col_prefix", "column_prefix"),
+			("col_start", "column_start"),
+			("col_pad", "column_padding"),
+		]:
+			value = poly.get(item_key)
+			if value is not None and value != "":
+				feat.SetField(field_name, value)
 		feat.SetGeometry(geom)
 		layer.CreateFeature(feat)
 		feat = None
@@ -127,10 +151,22 @@ def load_polygons_from_vector(vector_path: str, target_wkt: str = "") -> List[Di
 		if geom is None:
 			continue
 
-		name = ""
-		name_idx = feat.GetFieldIndex("name")
-		if name_idx >= 0:
-			name = str(feat.GetField("name") or "")
+		def read_field(field_name, default=None):
+			field_idx = feat.GetFieldIndex(field_name)
+			if field_idx < 0 or not feat.IsFieldSetAndNotNull(field_idx):
+				return default
+			return feat.GetField(field_idx)
+
+		name = str(read_field("name", "") or "")
+		metadata = {
+			"column_id": str(read_field("column_id", "") or ""),
+			"column_position": read_field("col_pos"),
+			"plot_index": read_field("plot_idx"),
+			"column_start_end": str(read_field("start_end", "") or ""),
+			"column_prefix": str(read_field("col_prefix", "") or ""),
+			"column_start": read_field("col_start"),
+			"column_padding": read_field("col_pad"),
+		}
 
 		polygons = []
 		gtype = geom.GetGeometryType()
@@ -167,7 +203,11 @@ def load_polygons_from_vector(vector_path: str, target_wkt: str = "") -> List[Di
 			if len(polygons) > 1:
 				poly_name = f"{poly_name}_{pidx}"
 
-			out.append({"name": poly_name, "geo_points": pts})
+			item = {"name": poly_name, "geo_points": pts}
+			for key, value in metadata.items():
+				if value is not None and value != "":
+					item[key] = value
+			out.append(item)
 
 	layer = None
 	ds = None
