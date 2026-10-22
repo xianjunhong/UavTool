@@ -2,6 +2,13 @@ import os
 import sys
 
 
+_dll_directory_handles = {}
+
+
+def _path_key(path):
+    return os.path.normcase(os.path.abspath(path.strip('"')))
+
+
 def configure_runtime_env(fallback_env_base: str = ""):
     """Ensure PROJ/GDAL runtime paths are configured before importing geo libs."""
     candidates = []
@@ -50,12 +57,17 @@ def configure_runtime_env(fallback_env_base: str = ""):
     if gdal_dir:
         os.environ["GDAL_DATA"] = gdal_dir
 
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    existing_paths = {_path_key(p) for p in path_entries if p}
     for b in bin_candidates:
         if not os.path.isdir(b):
             continue
-        os.environ["PATH"] = b + os.pathsep + os.environ.get("PATH", "")
-        if hasattr(os, "add_dll_directory"):
+        key = _path_key(b)
+        if key not in existing_paths:
+            os.environ["PATH"] = b + os.pathsep + os.environ.get("PATH", "")
+            existing_paths.add(key)
+        if hasattr(os, "add_dll_directory") and key not in _dll_directory_handles:
             try:
-                os.add_dll_directory(b)
+                _dll_directory_handles[key] = os.add_dll_directory(b)
             except Exception:
                 pass
